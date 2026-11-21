@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['c:/Users/Y-May/OneDrive/デスクトップ/offer/structure_decoder.py'],
+    ['structure_decoder.py'],
     pathex=[],
     binaries=[],
     datas=[],
