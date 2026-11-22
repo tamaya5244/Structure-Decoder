@@ -481,7 +481,16 @@ def normalize_block_indices(structure):
     layers = []
     changed = False
     for layer in block_indices:
-        if isinstance(layer, (nbtlib.IntArray, nbtlib.LongArray)):
+        if isinstance(layer, nbtlib.LongArray):
+            values = []
+            for packed in layer:
+                packed_value = int(packed) & ((1 << 64) - 1)
+                values.extend((packed_value >> shift) & 0xf for shift in range(60, -1, -4))
+            if any(not 0 <= value <= 0xf for value in values):
+                raise RuntimeError("block_indices contains an invalid 4-bit palette index")
+            layers.append(values)
+            changed = True
+        elif isinstance(layer, nbtlib.IntArray):
             values = [int(value) for value in layer]
             if any(not -(1 << 31) <= value < (1 << 31) for value in values):
                 raise RuntimeError("block_indices contains a value outside the signed 32-bit range")
@@ -494,10 +503,65 @@ def normalize_block_indices(structure):
         else:
             return
 
+    if len(layers) == 1:
+        layers.append([-1] * len(layers[0]))
+        changed = True
+
     if changed:
         structure["block_indices"] = nbtlib.List[nbtlib.List[nbtlib.Int]](
             nbtlib.List[nbtlib.Int](values) for values in layers
         )
+
+
+def deserialize_special_long_arrays(value, key=""):
+    if isinstance(value, nbtlib.Compound):
+        for child_key, child in list(value.items()):
+            if isinstance(child, nbtlib.LongArray):
+                lower_key = str(child_key).lower()
+                if (
+                    any(
+                        name in lower_key
+                        for name in ("uuid", "unique_id", "uniqueid", "persistentid")
+                    )
+                    and len(child) == 2
+                ):
+                    packed = (
+                        (int(child[0]) & ((1 << 64) - 1)) << 64
+                    ) | (int(child[1]) & ((1 << 64) - 1))
+                    hex_value = f"{packed:032x}"
+                    value[child_key] = nbtlib.String(
+                        "-".join(
+                            (
+                                hex_value[:8],
+                                hex_value[8:12],
+                                hex_value[12:16],
+                                hex_value[16:20],
+                                hex_value[20:],
+                            )
+                        )
+                    )
+                    continue
+                if lower_key in ("block_position", "block_pos", "position", "pos") and len(child) == 1:
+                    packed = int(child[0]) & ((1 << 64) - 1)
+                    x = (packed >> 38) & ((1 << 26) - 1)
+                    y = (packed >> 26) & ((1 << 12) - 1)
+                    z = packed & ((1 << 26) - 1)
+                    if x >= (1 << 25):
+                        x -= 1 << 26
+                    if z >= (1 << 25):
+                        z -= 1 << 26
+                    value[child_key] = nbtlib.Compound(
+                        {
+                            "X": nbtlib.Int(x),
+                            "Y": nbtlib.Int(y),
+                            "Z": nbtlib.Int(z),
+                        }
+                    )
+                    continue
+            deserialize_special_long_arrays(child, str(child_key))
+    elif isinstance(value, nbtlib.List):
+        for child in value:
+            deserialize_special_long_arrays(child, key)
 
 
 def parse_snbt_root(text):
@@ -630,6 +694,7 @@ def process_input(source, output_dir=None, source_name=None, output_mode="new"):
             raise RuntimeError("No compressed byte, int, or long array containing a valid NBT structure was found")
         payload, decompressed, structure = compressed_entry
 
+    deserialize_special_long_arrays(structure)
     normalize_block_indices(structure)
     root["structure"] = nbtlib.Compound(structure)
     root.pop("compression", None)
